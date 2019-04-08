@@ -133,6 +133,7 @@ class BIBFA(object):
                 "prodT":    None,
                 "LH":       None,
                 "Elogp":    None,
+                "sumlogdet":    0,
             }
             self.X.append(info) 
             #Regression
@@ -266,9 +267,6 @@ class BIBFA(object):
                 print('Iteration %d' %(i+1))
             else:
                 print('\rIteration %d Lower Bound %.1f K %4d' %(i+1,self.L[-1], q.Kc), end='\r', flush=True)
-#                print("\rIteration {:0>"+str(max_iter)+"} Lower Bound {:08.1f} K {:0>"+str(len(str(q.Kc)))+"}".format(int(i+1),self.L[-1],q.Kc))
-#                print("\rIteration {:0>2} Lower Bound {:08.1f} K {:0>2}\r".format(int(i+1),self.L[-1],q.Kc))
-
             # Lower Bound convergence criteria
             if (len(self.L) > 2) and (abs(1 - self.L[-2]/self.L[-1]) < conv_crit):
 #            if (len(self.L) > 2) and (abs(self.L[-1] - self.L[-2]) < conv_crit):
@@ -748,10 +746,10 @@ class BIBFA(object):
         """
         
         q = self.q_dist
-        # cov
-        q.tS[m]['cov'] = self.sigmoid(self.X[m]['mean'])/(1 + np.exp(self.X[m]['mean']))
         # mean
         q.tS[m]['mean'] = self.sigmoid(self.X[m]['mean'])
+        # cov
+        q.tS[m]['cov'] = q.tS[m]['mean']/(1 + np.exp(self.X[m]['mean']))
         
     def update_x(self,m): #Multilabel
         """Updates the variable X.
@@ -768,6 +766,8 @@ class BIBFA(object):
         
         q = self.q_dist
         self.X[m]['prodT'] = np.zeros((q.d[m],q.d[m]))
+        self.X[m]['sumlogdet'] = 0
+
         for n in np.arange(self.n_max):
             # cov
             self.X[m]['cov'][n,:] = (q.tau_mean(m) + 2*self.lambda_func(q.xi[m][n,:]))**(-1) #We store only the diagonal of the covariance matrix
@@ -775,6 +775,8 @@ class BIBFA(object):
             self.X[m]['mean'][n,:] = np.dot((self.t[m]['mean'][n,:] - 0.5 + q.tau_mean(m)*np.dot(q.Z['mean'][n,:],q.W[m]['mean'].T)),np.diag(self.X[m]['cov'][n,:]))
             # prodT
             self.X[m]['prodT'] += np.dot(self.X[m]['mean'][n,np.newaxis].T, self.X[m]['mean'][n,np.newaxis]) + np.diag(self.X[m]['cov'][n,:])
+            # sum(log(det(X)))
+            self.X[m]['sumlogdet'] += np.linalg.slogdet(np.diag(self.X[m]['cov'][n,:]))[1]
 
     def update_xi(self,m): #Multilabel    
         """Updates the variable xi.
@@ -908,16 +910,13 @@ class BIBFA(object):
         
         #Regression
         if self.method[m_out] == 0:   
-            if aprx:
-                 iterations = 100
-                 for it in np.arange(iterations):
-                    Z = np.random.normal(Z_mean,np.repeat(np.diag(Z_cov).reshape(1,q.Kc),Z_mean.shape[0],axis=0))
-                    p_t += np.dot(Z,q.W[m_out]['mean'].T)
-                 p_t = p_t/iterations
-            else:
-                var_x = q.tau_mean(m_out)**(-1)*np.eye(self.d[m_out]) + np.linalg.multi_dot([q.W[m_out]['mean'], Z_cov, q.W[m_out]['mean'].T])  #Variance               
-                mean_x = np.dot(Z_mean,q.W[m_out]['mean'].T) #Expectation
+            #Expectation X
+            mean_x = np.dot(Z_mean,q.W[m_out]['mean'].T) 
+            #Variance X
+            var_x = q.tau_mean(m_out)**(-1)*np.eye(self.d[m_out]) + np.linalg.multi_dot([q.W[m_out]['mean'], Z_cov, q.W[m_out]['mean'].T])                 
+            
             return mean_x, var_x
+        
         #Categorical
         elif self.method[m_out] == 1: 
              if aprx: 
@@ -933,25 +932,22 @@ class BIBFA(object):
              else:
                  m_zw = np.dot(Z_mean,q.W[m_out]['mean'].T)
                  for i in np.arange(self.d[m_out]-1):
-                    m_zwi = m_zw[:,i] #it extracts the mean of the values there are netiher i
+                    m_zwi = m_zw[:,i] #it extracts the mean of the values there are i
                     m_zwj = m_zw[:,np.arange(self.d[m_out])!=i] #it extracts the mean of the values there are j
                     p_t[:,i] += self.expectation_aprx(m_zwi, m_zwj, n=n_pred)   
              p_t[:,-1] = 1-np.sum(p_t[:,:-1],axis=1)
              return p_t
+         
         #Multilabel
         elif self.method[m_out] == 2: 
-            if aprx:
-                 iterations = 100
-                 for it in np.arange(iterations):
-                    Z = np.random.normal(Z_mean,np.repeat(np.diag(Z_cov).reshape(1,q.Kc),Z_mean.shape[0],axis=0))
-                    m_zw = np.dot(Z,q.W[m_out]['mean'].T)
-                    p_t += self.sigmoid(m_zw*(1+math.pi/8*q.tau_mean(m_out))**(-0.5))
-                 p_t = p_t/iterations
-            else:
-                m_x = np.dot(Z_mean,q.W[m_out]['mean'].T)        
-                var_x = q.tau_mean(m_out)**(-1)*np.eye(self.d[m_out]) + np.linalg.multi_dot([q.W[m_out]['mean'], Z_cov, q.W[m_out]['mean'].T])
-                for d in np.arange(self.d[m_out]):
-                    p_t[:,d] = self.sigmoid(m_x[:,d]*(1+math.pi/8*var_x[d,d])**(-0.5))
+            #Expectation X
+            m_x = np.dot(Z_mean,q.W[m_out]['mean'].T)     
+            #Variance X
+            var_x = q.tau_mean(m_out)**(-1)*np.eye(self.d[m_out]) + np.linalg.multi_dot([q.W[m_out]['mean'], Z_cov, q.W[m_out]['mean'].T])
+            
+            #Probability t
+            for d in np.arange(self.d[m_out]):
+                p_t[:,d] = self.sigmoid(m_x[:,d]*(1+math.pi/8*var_x[d,d])**(-0.5))
             return p_t
        
     def HGamma(self, a, b):
@@ -966,13 +962,13 @@ class BIBFA(object):
 
         """
         
-        #return gammaln(a)-(a-1)*digamma(a)-np.log(b)+a
         return -np.log(b)
     
-    def HGauss(self, mn, cov):
+    def HGauss(self, mn, cov, entr):
         """Compute the entropy of a Gamma distribution.
         
-        Uses slogdet function to avoid numeric problems.
+        Uses slogdet function to avoid numeric problems. If there is any 
+        infinity, doesn't update the entropy.
         
         Parameters
         ----------
@@ -980,56 +976,56 @@ class BIBFA(object):
             The parameter mean of a Gamma distribution.
         __covariance: float. 
             The parameter covariance of a Gamma distribution.
+        __entropy: float.
+            The entropy of the previous update. 
 
         """
-        
-        return 0.5*mn.shape[0]*np.linalg.slogdet(cov)[1]
+        H = 0.5*mn.shape[0]*np.linalg.slogdet(cov)[1]
+        if abs(H) == np.inf:
+            return entr
+        else:
+            return H
     
     def update_bound(self):
         """Update the Lower Bound.
         
-        Uses the learnt variables to calculate the lower bound.
+        Uses the learnt variables of the model to update the lower bound.
         
         """
         
         q = self.q_dist
         
-        HZ = self.HGauss(q.Z['mean'], q.Z['cov'])
-        if abs(HZ) == np.inf:
-            HZ = q.Z['LH']
-        q.Z['LH'] = HZ
+        # Entropy of Z
+        q.Z['LH'] = self.HGauss(q.Z['mean'], q.Z['cov'], q.Z['LH'])
         for m in np.arange(self.m):
+            # Entropy of W
             if self.sparse[m]:
                 q.W[m]['LH'] = 0.5*q.W[m]['sumlogdet']
                 q.gamma[m]['LH'] = np.sum(self.HGamma(q.gamma[m]['a'], q.gamma[m]['b']))
             else: 
-                HW = self.HGauss(q.W[m]['mean'], q.W[m]['cov'])
-                if abs(HW) == np.inf:
-                    HW = q.W[m]['LH']
-                q.W[m]['LH'] = HW
-                
+                q.W[m]['LH'] = self.HGauss(q.W[m]['mean'], q.W[m]['cov'], q.W[m]['LH'])
+            # Entropy of alpha and tau
             q.alpha[m]['LH'] = np.sum(self.HGamma(q.alpha[m]['a'], q.alpha[m]['b']))
             q.tau[m]['LH'] = np.sum(self.HGamma(q.tau[m]['a'], q.tau[m]['b']))
+            # Entropy of X if multilabel
             if self.method[m] == 2:
-                HX = 0.5*np.linalg.slogdet(np.diag(np.sum(self.X[m]['cov'], axis=0)))[1]
+                HX = 0.5*self.X[m]['sumlogdet']
                 if abs(HX) == np.inf:
                     HX = self.X[m]['LH']
                 self.X[m]['LH'] = HX
-                
+            # Entropies if semisupervised 
             if self.SS[m]:
                 if self.method[m] == 0:
-                    HXS = self.HGauss(q.XS[m]['mean'][self.n[m]:,:], q.XS[m]['cov'])
-                    if abs(HXS) == np.inf:
-                        HXS = q.Z['LH']
-                    q.XS[m]['LH'] = HXS
+                    q.XS[m]['LH'] = self.HGauss(q.XS[m]['mean'][self.n[m]:,:], q.XS[m]['cov'], q.XS[m]['LH'])
                 if self.method[m] == 2:
-                    self.t[m]['LH'] = 0
+                    q.tS[m]['LH'] = self.HGauss(q.tS[m]['mean'][self.n[m]:,:], q.tS[m]['cov'], q.tS[m]['LH'])
 
+        # Total entropy
         EntropyQ = q.Z['LH']
         for m in np.arange(self.m):
+            EntropyQ += q.W[m]['LH'] + q.alpha[m]['LH']  + q.tau[m]['LH']
             if self.sparse[m]:
                 EntropyQ += q.gamma[m]['LH']
-            EntropyQ += q.W[m]['LH'] + q.alpha[m]['LH']  + q.tau[m]['LH']
             if self.method[m] == 2:
                 EntropyQ += q.X[m]['LH']
             if self.SS[m]:
@@ -1037,15 +1033,19 @@ class BIBFA(object):
                     EntropyQ += q.XS[m]['LH']
                 if self.method[m] == 2:
                     EntropyQ += q.tS[m]['LH']
+                    
+        # Calculation of the E[log(p(Theta))]
         q.Z['Elogp'] = -0.5* np.trace(q.Z['prodT'])
         for m in np.arange(self.m):   
             q.tau[m]['ElogpXtau'] = -(0.5*self.n_max * self.d[m] + self.hyper.tau_a[m] -1)* np.log(q.tau[m]['b'])
             if self.method[m] == 2: #MultiLabel
-                q.tau[m]['ElogpXtau'] += np.sum(np.log(self.sigmoid(q.xi[m])) + self.X[m]['mean'] * self.t[m]['mean'] - 0.5 * self.X[m]['mean'] * q.xi[m])
+                q.tau[m]['ElogpXtau'] += np.sum(np.log(self.sigmoid(q.xi[m])) + self.X[m]['mean'] * self.t[m]['mean'] - 0.5 * (self.X[m]['mean'] + q.xi[m]))
             if self.sparse[m]: #Even though it sais Walp, it also includes the term related to gamma
                 q.alpha[m]['ElogpWalp'] = -(0.5* self.d[m] + self.hyper.alpha_a[m] -1)* np.sum(np.log(q.alpha[m]['b'])) -(0.5* q.Kc + self.hyper.gamma_a[m] -1)* np.sum(np.log(q.gamma[m]['b'])) #- self.hyper.gamma_b[m]*np.sum(q.gamma_mean(m))
             else:                    
                 q.alpha[m]['ElogpWalp'] = -(0.5* self.d[m] + self.hyper.alpha_a[m] -1)* np.sum(np.log(q.alpha[m]['b']))
+        
+        # Total E[log(p(Theta))]
         ElogP = q.Z['Elogp']
         for m in np.arange(self.m):
             ElogP += q.tau[m]['ElogpXtau'] + q.alpha[m]['ElogpWalp']
